@@ -1,17 +1,16 @@
 import os
+import joblib
+from datetime import date
 
 os.environ["PATH"] = (
     r"C:\Windows\System32" + os.pathsep + os.environ.get("PATH", "")
 )
-
-
 
 import numpy as np
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from data_loader import fetch_stock_data
 from data_processor import process_data
-
 
 def build_lstm_model(input_shape):
     """
@@ -20,24 +19,23 @@ def build_lstm_model(input_shape):
     """
     model = Sequential()
 
-    # Layer 1: First LSTM layer (returns sequences so the next LSTM layer can read them)
+    # Layer 1: First LSTM layer
     model.add(LSTM(units=50, return_sequences=True, input_shape=input_shape))
     model.add(Dropout(0.2))
 
-    # Layer 2: Second LSTM layer (summarizes the sequence into a single vector)
+    # Layer 2: Second LSTM layer
     model.add(LSTM(units=50, return_sequences=False))
     model.add(Dropout(0.2))
 
-    # Layer 3: Standard Dense hidden layer to interpret learned patterns
+    # Layer 3: Standard Dense hidden layer
     model.add(Dense(units=25))
 
-    # Layer 4: Output layer (predicts 1 single number: the next day's scaled Close price)
+    # Layer 4: Output layer
     model.add(Dense(units=1))
 
-    # Compile the model using Adam optimizer and Mean Squared Error loss
+    # Compile the model
     model.compile(optimizer="adam", loss="mean_squared_error")
     return model
-
 
 def train_model(model, x_train, y_train, epochs=25, batch_size=32):
     """
@@ -52,10 +50,12 @@ def train_model(model, x_train, y_train, epochs=25, batch_size=32):
     )
     return model, history
 
-
 if __name__ == "__main__":
-    # 1. Fetch and process the NSE data using your existing pipeline
-    df = fetch_stock_data("RELIANCE.NS", "2021-01-01", "2024-01-01")
+    # 1. Fetch and process the NSE data up to TODAY
+    today_str = date.today().strftime("%Y-%m-%d")
+    print(f"Fetching data from 2021-01-01 to {today_str}...")
+    
+    df = fetch_stock_data("RELIANCE.NS", "2021-01-01", today_str)
     x_train, y_train, scaler = process_data(df, time_steps=60)
 
     # 2. Build the model using (60, 1) from x_train.shape[1:]
@@ -68,6 +68,9 @@ if __name__ == "__main__":
     print("\nStarting training...")
     model, history = train_model(model, x_train, y_train, epochs=25, batch_size=32)
 
-    # 4. Save the trained brain so Streamlit can load it later without retraining
+    # 4. Save the trained brain AND the scaler memory
     model.save("lstm_stock_model.keras")
+    joblib.dump(scaler, "scaler.pkl")
+    
     print("\nModel saved successfully as 'lstm_stock_model.keras'!")
+    print("Scaler memory saved successfully as 'scaler.pkl'!")
