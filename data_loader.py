@@ -1,5 +1,9 @@
 import yfinance as yf
 import pandas as pd
+from datetime import date
+
+# Import master variables for the local testing block
+from config import TICKER, START_DATE
 
 def fetch_stock_data(ticker, start_date, end_date):
     print(f"Fetching data for {ticker}...")
@@ -12,8 +16,10 @@ def fetch_stock_data(ticker, start_date, end_date):
     return stock_data
 
 if __name__ == "__main__":
-    # Using Reliance Industries (.NS suffix for NSE)
-    df = fetch_stock_data("RELIANCE.NS", "2021-01-01", "2024-01-01")
+    today_str = date.today().strftime("%Y-%m-%d")
+    
+    # Using master config variables instead of hardcoded strings
+    df = fetch_stock_data(TICKER, START_DATE, today_str)
     
     print("\nData successfully loaded!")
     print(df.head())
