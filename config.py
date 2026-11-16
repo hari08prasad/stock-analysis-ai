@@ -13,7 +13,7 @@ TIME_STEPS = 20
 
 # Random seed: same seed + same data + same features = repeatable results.
 # To check that a result is not just luck, change this (42, 7, 123...) and re-run.
-SEED = 7
+SEED = 123
 
 # ------------------------------------------
 # TRAIN / TEST SPLIT DATE
@@ -42,4 +42,4 @@ else:
 #   Step 2: ["Return", "RSI"]
 #   Step 3: ["Return", "RSI", "SMA_ratio"]
 #   Step 4: ["Return", "RSI", "SMA_ratio", "Volume_ratio"]
-FEATURE_SET = ["Return"]
+FEATURE_SET =  ["Return", "RSI", "SMA_ratio", "Volume_ratio", "Sentiment"]

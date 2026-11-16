@@ -1,21 +1,10 @@
-"""
-feature_indicators.py
+import os
 
-Builds a small set of technical-indicator features from daily price data.
-
-THE GOLDEN RULE: the output is indexed by Date (YYYY-MM-DD, no timezone),
-so it can be merged with the sentiment dataframe using the index.
-
-NO LEAKAGE: every value on row t uses only data up to day t.
-The model's job is to predict the return of day t+1.
-
-We keep only 3 indicators on purpose. Each one measures a DIFFERENT idea
-(momentum, trend, trading activity). Using several indicators that measure
-the same idea adds noise, and with ~1000 training days that makes the
-model overfit.
-"""
 import numpy as np
 import pandas as pd
+
+# Where sentiment_loader.py saves its output (must be in the project folder)
+SENTIMENT_FILE = "sentiment_daily.csv"
 
 # The columns the model will use as input.
 # Return is the base feature (and also the prediction target, shifted 1 day).
@@ -24,6 +13,7 @@ FEATURE_COLUMNS = [
     "RSI",           # momentum: is the stock stretched up or down?
     "SMA_ratio",     # trend: where is price vs its recent average?
     "Volume_ratio",  # activity: is today busier than normal?
+    "Sentiment",     # news tone from FinBERT (sentiment_loader.py)
 ]
 
 
@@ -87,6 +77,25 @@ def compute_volume_ratio(volume, window=20):
     return np.log(volume / volume.rolling(window).mean())
 
 
+def add_sentiment(df, path=SENTIMENT_FILE):
+    """
+    Joins the daily sentiment score onto the price table by Date (the master key).
+    Days with no news get 0.0 (neutral).
+
+    If the sentiment file is missing, Sentiment is set to 0 for every day so
+    the indicator-only experiments still run.
+    """
+    if os.path.exists(path):
+        sentiment = pd.read_csv(path, index_col="Date", parse_dates=True)[["Sentiment"]]
+        sentiment.index = pd.to_datetime(sentiment.index).tz_localize(None).normalize()
+        df = df.join(sentiment, how="left")
+        df["Sentiment"] = df["Sentiment"].fillna(0.0)
+    else:
+        print(f"WARNING: {path} not found. Sentiment set to 0 for all days.")
+        df["Sentiment"] = 0.0
+    return df
+
+
 def add_indicators(df):
     """
     Takes the raw dataframe from fetch_stock_data (needs Close and Volume)
@@ -108,6 +117,9 @@ def add_indicators(df):
     df["SMA_ratio"] = compute_sma_ratio(df["Close"])
     df["Volume_ratio"] = compute_volume_ratio(df["Volume"])
 
+    # Merge the news sentiment (joined on the Date index)
+    df = add_sentiment(df)
+
     # The first ~20 rows are NaN while the averages "warm up"; drop them
     df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=FEATURE_COLUMNS)
 
@@ -127,3 +139,5 @@ if __name__ == "__main__":
     print("\nShape:", feats.shape)
     print("Index name:", feats.index.name, "| tz:", feats.index.tz)
     print("Any NaN left?", feats.isna().any().any())
+    print("Days with non-zero sentiment:", int((feats["Sentiment"] != 0).sum()),
+          "of", len(feats))
