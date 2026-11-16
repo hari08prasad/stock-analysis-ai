@@ -1,114 +1,119 @@
+import os
 import numpy as np
 import pandas as pd
 import joblib
-from datetime import date
+from datetime import date, datetime
 from tensorflow.keras.models import load_model
 from sklearn.metrics import mean_squared_error
-from data_loader import fetch_stock_data
 
-# --- NEW: Import variables from master config ---
-from config import TIME_STEPS, TICKER, START_DATE, SPLIT_DATE
+from data_loader import fetch_stock_data
+from feature_indicators import add_indicators
+from data_processor import build_sequences
+from config import TIME_STEPS, TICKER, START_DATE, SEED
+
+LOG_FILE = "results_log.csv"
+
+
+def log_result(row):
+    """Appends one experiment result to results_log.csv (creates it if missing)."""
+    pd.DataFrame([row]).to_csv(
+        LOG_FILE, mode="a", header=not os.path.exists(LOG_FILE), index=False
+    )
+
 
 def evaluate_and_predict(ticker=TICKER, start_date=START_DATE):
-    print("Loading saved LSTM model and Scaler memory...")
+    print("Loading saved model, scalers, features and frozen timeline...")
     model = load_model("lstm_stock_model.keras")
-    
-    # 1. LOAD the exact scaler memory used during training
-    scaler = joblib.load("scaler.pkl")
+    x_scaler = joblib.load("x_scaler.pkl")
+    y_scaler = joblib.load("y_scaler.pkl")
+    frozen_split_date = joblib.load("split_date.pkl")
+    features = joblib.load("features.pkl")   # exactly what the model was trained on
 
-    # 2. Fetch data dynamically up to TODAY
     today_str = date.today().strftime("%Y-%m-%d")
     print(f"Fetching data from {start_date} to {today_str}...")
-    df = fetch_stock_data(ticker, start_date, today_str)
-    
-    # Calculate Returns (Market Momentum)
-    df['Return'] = df['Close'].pct_change()
-    df.dropna(inplace=True) 
-    
-    # --- THE EXPERT FIX: FIXED DATE SPLIT ---
-    # 3. Find the exact row index of the split date
-    split_pos = df.index.searchsorted(SPLIT_DATE)
-    test_df = df.iloc[split_pos - TIME_STEPS:].copy() 
+    df = add_indicators(fetch_stock_data(ticker, start_date, today_str))
 
-    # 4. Process ONLY the test data using the LOADED scaler on RETURNS
-    test_data = test_df['Return'].to_numpy().reshape(-1, 1)
-    scaled_test = scaler.transform(test_data)
+    # Test data = everything from the frozen split date on.
+    # We keep TIME_STEPS earlier rows so the first test window is complete.
+    split_pos = df.index.searchsorted(pd.Timestamp(frozen_split_date))
+    test_df = df.iloc[split_pos - TIME_STEPS:].copy()
 
-    x_test, y_test = [], []
-    for i in range(TIME_STEPS, len(scaled_test)):
-        x_test.append(scaled_test[i-TIME_STEPS:i, 0])
-        y_test.append(scaled_test[i, 0])
-    
-    x_test = np.array(x_test)
-    y_test = np.array(y_test)
-    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+    x_test, y_test_scaled = build_sequences(
+        test_df, features, x_scaler, y_scaler, TIME_STEPS
+    )
 
-    # 5. Make predictions on the unseen test data
+    # Predict, then convert back to real daily returns (e.g. 0.004 = +0.4%)
     scaled_predictions = model.predict(x_test, verbose=0)
-    
-    # Translate decimals back to actual Percentage Returns
-    predicted_returns = scaler.inverse_transform(scaled_predictions)
-    actual_returns = scaler.inverse_transform(y_test.reshape(-1, 1))
+    predicted = y_scaler.inverse_transform(scaled_predictions).ravel()
+    actual = y_scaler.inverse_transform(y_test_scaled.reshape(-1, 1)).ravel()
 
-    # --- 6. CALCULATE METRICS & BASELINE ON RETURNS ---
-    rmse = np.sqrt(mean_squared_error(actual_returns, predicted_returns))
-    
-    # Naive Baseline for Returns: Assuming tomorrow's return will be exactly 0.0
-    baseline_predictions = np.zeros_like(actual_returns)
-    baseline_rmse = np.sqrt(mean_squared_error(actual_returns, baseline_predictions))
-    
-    # --- THE EXPERT FIX: MAJORITY BASELINE & NOISE MARGIN ---
-    actual_direction = np.sign(actual_returns)
-    predicted_direction = np.sign(predicted_returns)
-    
-    mda = np.mean(actual_direction == predicted_direction) * 100
-    majority = max(np.mean(actual_direction > 0), np.mean(actual_direction < 0)) * 100
+    # --- Metrics ---
+    rmse = np.sqrt(mean_squared_error(actual, predicted))
+    baseline_rmse = np.sqrt(mean_squared_error(actual, np.zeros_like(actual)))  # "return = 0"
 
-    print(f"\n--------------------------------------------------")
-    print(f" Stock: {ticker} (Test Data since {SPLIT_DATE})")
-    print(f" AI Model Error (RMSE):      {rmse:.4f}")
-    print(f" Naive Baseline Error:       {baseline_rmse:.4f}")
-    print(f"--------------------------------------------------")
+    mda = np.mean(np.sign(actual) == np.sign(predicted)) * 100
+    majority = max(np.mean(actual > 0), np.mean(actual < 0)) * 100
+    n = len(actual)
+    margin = 98 / np.sqrt(n)                      # ~95% "luck zone" in percentage points
+    pct_pred_up = np.mean(predicted > 0) * 100    # does the model just say UP all the time?
 
-    # Evaluate Magnitude Edge
-    if rmse < baseline_rmse:
-        print(f" ✅ EDGE: AI beats the Baseline in exact magnitude.")
-    else:
-        print(f" ⚠️ LAGGING: AI loses to the Baseline in exact magnitude.")
-        
-    # Evaluate Directional Edge using Expert Logic
-    print(f" Directional Accuracy (MDA): {mda:.2f}%  (always-guess-majority: {majority:.2f}%)")
-    if mda > majority + 4:
-        print(" ✅ Direction beats the majority baseline by more than the noise margin.")
-    else:
-        print(" ⚠️ Direction is not distinguishable from guessing.")
-    print(f"--------------------------------------------------")
+    beats_rmse = rmse < baseline_rmse
+    beats_direction = mda > majority + margin
 
-    # 7. Predict strictly for TOMORROW
-    last_X_days = df['Return'].values[-TIME_STEPS:]
-    scaled_last_X = scaler.transform(last_X_days.reshape(-1, 1))
-    
-    # Reshape for the AI: (1 sequence, TIME_STEPS, 1 feature)
-    X_tomorrow = np.reshape(scaled_last_X, (1, TIME_STEPS, 1))
-    
-    # Predict and translate the return
-    scaled_tomorrow = model.predict(X_tomorrow, verbose=0)
-    predicted_tomorrow_return = scaler.inverse_transform(scaled_tomorrow)[0][0]
-    
-    # Convert predicted return back to an actual Rupee price
-    latest_actual_close = float(df['Close'].values[-1][0])
-    tomorrow_price = latest_actual_close * (1 + predicted_tomorrow_return)
-    
-    # Calculate Direction (UP or DOWN)
-    price_difference = tomorrow_price - latest_actual_close
-    direction = "📈 UP" if price_difference > 0 else "📉 DOWN"
-    
-    print(f"\n🔮 PREDICTION FOR NEXT TRADING DAY")
-    print(f" Forecasted Return:      {predicted_tomorrow_return * 100:.2f}%")
-    print(f" Forecasted Close Price: ₹{tomorrow_price:.2f}")
-    print(f" Forecasted Movement:    {direction} (by ₹{abs(price_difference):.2f})\n")
+    print("\n--------------------------------------------------")
+    print(f" Stock: {ticker}  | Features: {features}")
+    print(f" Test data since {frozen_split_date} ({n} days)")
+    print(f" AI Model Error (RMSE):  {rmse:.5f}")
+    print(f" Naive Baseline (RMSE):  {baseline_rmse:.5f}")
+    print("--------------------------------------------------")
+    print(" ✅ AI beats the baseline in magnitude." if beats_rmse
+          else " ⚠️ AI does not beat the baseline in magnitude.")
+    print(f" Directional Accuracy: {mda:.2f}%  "
+          f"(majority guess: {majority:.2f}%, noise ±{margin:.1f}%)")
+    print(" ✅ Direction beats the majority baseline by more than the noise margin."
+          if beats_direction
+          else " ⚠️ Direction is not distinguishable from guessing.")
+    print(f" Model predicted UP on {pct_pred_up:.0f}% of test days")
+    print("--------------------------------------------------")
 
-    return predicted_returns, actual_returns
+    # --- Log this experiment ---
+    log_result({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "features": "+".join(features),
+        "seed": SEED,
+        "split_date": frozen_split_date,
+        "test_days": n,
+        "rmse": round(float(rmse), 6),
+        "baseline_rmse": round(float(baseline_rmse), 6),
+        "mda": round(float(mda), 2),
+        "majority": round(float(majority), 2),
+        "noise_margin": round(float(margin), 2),
+        "pct_pred_up": round(float(pct_pred_up), 1),
+        "beats_rmse": bool(beats_rmse),
+        "beats_direction": bool(beats_direction),
+    })
+    print(f" Result saved to {LOG_FILE}")
+
+    # --- Experimental forecast for the next trading day ---
+    # (yfinance's end date is exclusive, so the last row is the most recent closed day
+    #  before today.) Treat this as a demo until the model beats the noise margin.
+    last_window = df[features].tail(TIME_STEPS).to_numpy()
+    x_tomorrow = x_scaler.transform(last_window).reshape(1, TIME_STEPS, len(features))
+
+    scaled_tomorrow = model.predict(x_tomorrow, verbose=0)
+    predicted_return = float(y_scaler.inverse_transform(scaled_tomorrow)[0][0])
+
+    latest_close = float(df["Close"].iloc[-1])
+    forecast_price = latest_close * (1 + predicted_return)
+    direction = "📈 UP" if predicted_return > 0 else "📉 DOWN"
+
+    print("\n🔮 EXPERIMENTAL FORECAST FOR THE NEXT TRADING DAY")
+    print(f" Forecasted Return:      {predicted_return * 100:.2f}%")
+    print(f" Forecasted Close Price: ₹{forecast_price:.2f}")
+    print(f" Forecasted Movement:    {direction} (by ₹{abs(forecast_price - latest_close):.2f})\n")
+
+    return predicted, actual
+
 
 if __name__ == "__main__":
     evaluate_and_predict()
